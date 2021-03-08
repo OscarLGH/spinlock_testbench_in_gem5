@@ -3,46 +3,69 @@
 #include "atomic.h"
 
 typedef struct spinlock {
-	int val;
-	pthread_spinlock_t lock;
-} spinlock_t;
+	long locked;
+	struct spinlock *next;
+	char padding[48];
+} clh_spinlock_t;
 
-void spinlock_init(spinlock_t * lock)
+
+void clh_spinlock(clh_spinlock_t **lock, clh_spinlock_t *node)
 {
-	pthread_spin_init(&lock->lock, PTHREAD_PROCESS_PRIVATE);
+	node->locked = 1;
+	node->next = NULL;
+
+	clh_spinlock_t *prev = atomic_test_and_set(lock, node);
+	if (prev == NULL) {
+		return;
+	}
+
+	atomic_set(&prev->next, node);
+
+	//spin on prev node
+	while (prev->locked);
+
+	// lock acquired.
 }
 
-void spinlock(spinlock_t *lock)
+void clh_spinunlock(clh_spinlock_t **lock, clh_spinlock_t *node)
 {
-	pthread_spin_lock(&lock->lock);
+	clh_spinlock_t *next = node->next;
+
+	if (!next) {
+		if (atomic_cmpxchg(lock, node, NULL) == node)
+			return;
+		while (!(next = node->next)) {
+			//pause or relax or nop
+		}
+	}
+
+	atomic_set(&node->locked, 0);
 }
 
-void spinunlock(spinlock_t *lock)
-{
-	pthread_spin_unlock(&lock->lock);
-}
+clh_spinlock_t **clh_lock_array;
+clh_spinlock_t *tail = NULL;
 
-spinlock_t g_spinlock;
+long sum = 0;
 void *thread_fun(void *arg)
 {
-	long *p = arg;
-	spinlock(&g_spinlock);
-	p[0]++;
-	spinunlock(&g_spinlock);
+	clh_spinlock_t *node = arg;
+	clh_spinlock(&tail, node);
+	sum++;
+	clh_spinunlock(&tail, node);
 	return (void *)0;
 }
 
 int main(int argc, char **argv)
 {
 	int i;
-	long sum = 0;
+	//long sum = 0;
 	pthread_t *tid_array;
 	int thread_cnt = atoi(argv[1]);
-
-	spinlock_init(&g_spinlock);
+	clh_spinlock_t *node;
 	tid_array = malloc(sizeof(*tid_array) * thread_cnt);
 	for (i = 0; i < thread_cnt; i++) {
-		pthread_create(&tid_array[i], NULL, thread_fun, (void *)&sum);
+		node = malloc(sizeof(*node));
+		pthread_create(&tid_array[i], NULL, thread_fun, (void *)node);
 	}
 
 	for (i = 0; i < thread_cnt; i++) {
